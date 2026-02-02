@@ -27,19 +27,25 @@ def logout():
     st.session_state.admin_logged_in = False
 
 # ==========================================
-# 2. FUNCIONES DE LECTURA (CEREBRO UNIVERSAL)
+# 2. FUNCIONES DE LECTURA (CEREBRO UNIVERSAL MEJORADO)
 # ==========================================
 
 def clean_columns(df):
-    """Limpia nombres de columnas (quita espacios) y unifica 'Codigo' a 'Código'"""
-    df.columns = [str(c).strip() for c in df.columns]
+    """
+    Limpia nombres de columnas:
+    - Quita espacios
+    - Elimina BOM (marcas invisibles de Excel)
+    - Unifica nombres
+    """
+    # Limpieza agresiva de caracteres invisibles
+    df.columns = [str(c).strip().replace('\ufeff', '') for c in df.columns]
     
-    # Mapeos de nombres comunes
     rename_map = {
         'Codigo': 'Código',
         'Descripcion': 'Descripción',
         'Stock 1ra un': 'Stock 1ra un.',
-        'Stock': 'Stock 1ra un.'
+        'Stock': 'Stock 1ra un.',
+        'Precio': 'Precio'
     }
     df.rename(columns=rename_map, inplace=True)
     return df
@@ -49,19 +55,27 @@ def try_read_csv_strategies(file_obj, strategies):
         for sep in strategies['separators']:
             try:
                 file_obj.seek(0)
+                # Buscamos header en las primeras 20 líneas
                 header_idx = 0
                 found = False
                 for i in range(20):
-                    line = file_obj.readline().decode(enc).lower()
-                    if 'código' in line or 'codigo' in line:
-                        header_idx = i
-                        found = True
-                        break
+                    try:
+                        line = file_obj.readline().decode(enc).lower()
+                        # Buscamos variantes comunes
+                        if 'código' in line or 'codigo' in line:
+                            header_idx = i
+                            found = True
+                            break
+                    except:
+                        continue # Si falla decodificar la línea, seguimos
+                
                 if not found: header_idx = 0 
 
                 file_obj.seek(0)
-                df = pd.read_csv(file_obj, header=header_idx, encoding=enc, sep=sep)
+                # engine='python' es más robusto para archivos raros
+                df = pd.read_csv(file_obj, header=header_idx, encoding=enc, sep=sep, engine='python')
                 df = clean_columns(df)
+                
                 if 'Código' in df.columns:
                     return df
             except:
@@ -72,9 +86,12 @@ def load_universal_file(uploaded_file):
     filename = uploaded_file.name.lower()
     df = None
     
-    # ESTRATEGIA A: Excel
+    # ESTRATEGIA A: Excel Nativo (.xlsx / .xls)
+    # Intentamos esto primero solo si la extensión coincide, pero si falla
+    # asumimos que podría ser un "Falso Excel" (HTML o CSV renombrado)
     if filename.endswith('.xlsx') or filename.endswith('.xls'):
         try:
+            # Leemos sin header para buscar la fila correcta
             df_raw = pd.read_excel(uploaded_file, header=None)
             header_idx = -1
             for i, row in df_raw.head(20).iterrows():
@@ -93,11 +110,13 @@ def load_universal_file(uploaded_file):
             if 'Código' in df.columns:
                 return df
         except Exception:
-            pass
+            pass # Falló lectura excel real, pasamos a CSV
 
-    # ESTRATEGIA B: CSV
-    encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+    # ESTRATEGIA B: Texto / CSV (Incluye utf-8-sig para BOM)
+    # Agregamos 'utf-8-sig' que es crucial para Excels guardados como CSV
+    encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
     separators = [',', ';', '\t']
+    
     df = try_read_csv_strategies(uploaded_file, {'encodings': encodings, 'separators': separators})
     return df
 
@@ -138,7 +157,7 @@ def load_data():
                 df[col] = None 
         return df
     except:
-        return pd.DataFrame(columns=['Nombre_Lote', 'Estado_Stock', 'Código', 'Color', 'Stock 1ra un.', 'Descripción', 'Modelo_Ref'])
+        return pd.DataFrame(columns=['Nombre_Lote', 'Estado_Stock', 'Código'])
 
 df_master = load_data()
 
@@ -170,9 +189,9 @@ if modo == "➕ Iniciar NUEVO Stock":
     st.header("Cargar Nuevo Lote")
     col1, col2 = st.columns(2)
     with col1:
-        nuevo_lote = st.text_input("Nombre del Lote / Sector", placeholder="Ej: Zapatos_Deposito")
+        nuevo_lote = st.text_input("Nombre del Lote / Sector", placeholder="Ej: Estanteria_A")
     with col2:
-        archivo = st.file_uploader("Subir archivo (.xlsx, .xls, .csv)", type=['xlsx', 'xls', 'csv'])
+        archivo = st.file_uploader("Subir archivo", type=['xlsx', 'xls', 'csv'])
 
     if st.button("🚀 Procesar y Crear", type="primary") and archivo and nuevo_lote:
         nombre_limpio = nuevo_lote.strip()
@@ -181,10 +200,11 @@ if modo == "➕ Iniciar NUEVO Stock":
         if nombre_limpio in lotes_existentes:
             st.error(f"⚠️ Ya existe '{nombre_limpio}'. Usa otro nombre.")
         else:
+            # Usamos la lectura universal mejorada
             df_new = load_universal_file(archivo)
             
             if df_new is None or 'Código' not in df_new.columns:
-                st.error("❌ No se pudo leer el archivo. Verifica columnas.")
+                st.error("❌ No se pudo leer el archivo. Verifica que tenga la columna 'Código'.")
             else:
                 try:
                     parsed = df_new['Código'].apply(parse_product_code)
@@ -192,8 +212,10 @@ if modo == "➕ Iniciar NUEVO Stock":
                     df_new['Color_Code'] = [x[1] for x in parsed]
                     df_new['Talle_Code'] = [x[2] for x in parsed]
                     
+                    # Rellenar columnas faltantes para evitar errores
                     if 'Color' not in df_new.columns: df_new['Color'] = ""
                     if 'Stock 1ra un.' not in df_new.columns: df_new['Stock 1ra un.'] = 0
+                    if 'Descripción' not in df_new.columns: df_new['Descripción'] = "S/D"
                     
                     df_new['Nombre_Lote'] = nombre_limpio
                     df_new['Estado_Stock'] = "Pendiente"
@@ -211,7 +233,7 @@ if modo == "➕ Iniciar NUEVO Stock":
                     st.error(f"Error procesando datos: {e}")
 
 # ---------------------------------------------------------
-# ZONA B: CONTINUAR / EDITAR (CON FILTROS)
+# ZONA B: CONTINUAR / EDITAR (CON FILTROS EN CASCADA)
 # ---------------------------------------------------------
 elif modo == "📂 Continuar / Editar Stock":
     lotes = [x for x in df_master['Nombre_Lote'].unique() if str(x) != 'nan']
@@ -219,7 +241,6 @@ elif modo == "📂 Continuar / Editar Stock":
     if not lotes:
         st.info("👋 No hay stocks activos.")
     else:
-        # Selector de Lote
         col_sel, col_btn = st.columns([3, 1])
         with col_sel:
             seleccion = st.selectbox("Selecciona el Lote:", lotes)
@@ -230,29 +251,32 @@ elif modo == "📂 Continuar / Editar Stock":
                 st.cache_data.clear()
                 st.rerun()
         
-        # 1. Obtener Dataframe Completo del Lote
+        # 1. Obtener Dataframe
         df_lote = df_master[df_master['Nombre_Lote'] == seleccion].copy()
         
-        # 2. FILTROS AVANZADOS
+        # 2. FILTROS EN CASCADA (Descripcion -> Modelo)
         st.write("---")
-        with st.expander("🔍 Filtros de Visualización (Click para desplegar)", expanded=True):
-            st.caption("Selecciona qué items quieres ver para contar más ordenado.")
+        with st.expander("🔍 Filtros de Visualización", expanded=True):
             f_col1, f_col2 = st.columns(2)
             
             with f_col1:
-                # Opciones únicas de Descripción
+                # Opciones de Descripción (Siempre todas las disponibles en el lote)
                 opts_desc = sorted(df_lote['Descripción'].dropna().astype(str).unique())
-                sel_desc = st.multiselect("Filtrar por Descripción:", opts_desc, placeholder="Todos (Selecciona para filtrar)")
+                sel_desc = st.multiselect("1. Filtrar por Descripción:", opts_desc, placeholder="Todos")
             
             with f_col2:
-                # Opciones únicas de Modelo
-                if 'Modelo_Ref' in df_lote.columns:
-                    opts_mod = sorted(df_lote['Modelo_Ref'].dropna().astype(str).unique())
+                # Opciones de Modelo (Dependen de lo que elijas en Descripción)
+                if sel_desc:
+                    # Si hay descripciones seleccionadas, filtramos los modelos compatibles
+                    df_filtered_temp = df_lote[df_lote['Descripción'].astype(str).isin(sel_desc)]
+                    opts_mod = sorted(df_filtered_temp['Modelo_Ref'].dropna().astype(str).unique())
                 else:
-                    opts_mod = []
-                sel_mod = st.multiselect("Filtrar por Modelo:", opts_mod, placeholder="Todos")
+                    # Si no, mostramos todos los modelos del lote
+                    opts_mod = sorted(df_lote['Modelo_Ref'].dropna().astype(str).unique()) if 'Modelo_Ref' in df_lote.columns else []
+                
+                sel_mod = st.multiselect("2. Filtrar por Modelo:", opts_mod, placeholder="Todos (Filtrado por Desc.)")
 
-        # 3. Aplicar Filtros (Creamos una vista filtrada)
+        # 3. Aplicar Filtros a la Vista
         df_view = df_lote.copy()
         
         if sel_desc:
@@ -261,14 +285,13 @@ elif modo == "📂 Continuar / Editar Stock":
         if sel_mod:
             df_view = df_view[df_view['Modelo_Ref'].astype(str).isin(sel_mod)]
             
-        # Ordenar la vista
+        # Ordenar
         if 'Modelo_Ref' in df_view.columns:
             df_view = df_view.sort_values(by=['Modelo_Ref', 'Color_Code', 'Talle_Code'])
 
-        # Mostrar métricas de lo que se ve
-        st.caption(f"Mostrando {len(df_view)} items (de un total de {len(df_lote)} en este lote).")
+        st.caption(f"Mostrando {len(df_view)} items.")
 
-        # 4. Editor de Datos (Sobre la vista filtrada)
+        # 4. Editor
         cols_cfg = {
             "Código": st.column_config.TextColumn("Cód.", disabled=True),
             "Modelo_Ref": st.column_config.TextColumn("Modelo", disabled=True),
@@ -296,26 +319,23 @@ elif modo == "📂 Continuar / Editar Stock":
             key=f"editor_{seleccion}"
         )
         
-        # 5. Guardado Inteligente
+        # 5. Guardado
         if st.button("💾 Guardar Cambios en la Nube", type="primary"):
-            # Actualizamos el dataframe PRINCIPAL (df_lote) usando los cambios de la VISTA (edited_view)
-            # Como pandas mantiene los índices originales al filtrar, esto funciona perfecto.
             df_lote.update(edited_view)
             
-            # Reconstruir Master y Guardar
             df_clean_master = df_master[df_master['Nombre_Lote'] != seleccion]
             df_final_upload = pd.concat([df_clean_master, df_lote], ignore_index=True)
             
             conn.update(worksheet="Hoja1", data=df_final_upload)
-            st.success("✅ ¡Guardado! Se actualizaron los datos (incluso si estabas filtrando).")
+            st.success("✅ Guardado sincronizado.")
             time.sleep(1.5)
             st.rerun()
 
-        # Resumen de Diferencias (Muestra todo el lote, no solo lo filtrado, para tener panorama general)
+        # Resumen (Muestra diferencias de TODO el lote, no solo lo filtrado)
         st.divider()
         diferencias = df_lote[df_lote['Estado_Stock'].isin(['🔴 Falta', '🟣 Sobra'])]
         if not diferencias.empty:
-            st.write("### 🚨 Diferencias en todo el lote")
+            st.write("### 🚨 Diferencias en el Lote Completo")
             st.dataframe(diferencias[cols_final].style.map(color_rows, subset=['Estado_Stock']), use_container_width=True, hide_index=True)
         else:
             st.info("Todo OK o Pendiente en el reporte general.")
