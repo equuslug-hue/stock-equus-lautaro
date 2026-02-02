@@ -7,14 +7,13 @@ import time
 st.set_page_config(page_title="Stock Lautaro App", layout="wide")
 
 # ==========================================
-# 1. GESTIÓN DE SESIÓN Y LOGIN DE ADMIN
+# 1. GESTIÓN DE SESIÓN Y LOGIN
 # ==========================================
 if 'admin_logged_in' not in st.session_state:
     st.session_state.admin_logged_in = False
 
 def check_admin_password():
     """Verifica la contraseña contra los secrets de Streamlit"""
-    # Debes tener configurado [admin] password = "..." en tus secrets
     try:
         if st.session_state.password_input == st.secrets["admin"]["password"]:
             st.session_state.admin_logged_in = True
@@ -22,67 +21,96 @@ def check_admin_password():
         else:
             st.error("❌ Contraseña incorrecta")
     except Exception:
-        st.error("⚠️ No has configurado la contraseña en los Secrets.")
+        st.error("⚠️ Error: No has configurado [admin] password en los Secrets.")
 
 def logout():
     st.session_state.admin_logged_in = False
 
 # ==========================================
-# 2. FUNCIONES DE UTILERÍA (Parseo, Color y LECTURA ROBUSTA)
+# 2. FUNCIONES DE LECTURA DE ARCHIVOS (LA CLAVE)
 # ==========================================
 
-def load_smart_csv(uploaded_file):
+def clean_columns(df):
+    """Limpia nombres de columnas y unifica 'Codigo' a 'Código'"""
+    df.columns = [str(c).strip() for c in df.columns]
+    if 'Codigo' in df.columns:
+        df.rename(columns={'Codigo': 'Código'}, inplace=True)
+    return df
+
+def load_universal_file(uploaded_file):
     """
-    Intenta leer el archivo probando diferentes codificaciones y buscando
-    automáticamente dónde empieza la cabecera (header) para evitar errores.
+    Intenta leer Excel (.xlsx) o CSV (.csv) buscando la cabecera automáticamente.
     """
-    # Lista de codificaciones comunes en sistemas de facturación
-    encodings = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+    filename = uploaded_file.name.lower()
     
-    for enc in encodings:
+    # --- ESTRATEGIA 1: ES UN EXCEL (.xlsx / .xls) ---
+    if filename.endswith('.xlsx') or filename.endswith('.xls'):
         try:
-            uploaded_file.seek(0)
+            # Leemos sin header primero para buscar dónde empieza
+            df_raw = pd.read_excel(uploaded_file, header=None)
             
-            # 1. Detectar cabecera leyendo las primeras líneas
-            header_idx = 0
-            found_header = False
+            # Buscamos en las primeras 10 filas dónde está la palabra "Código"
+            header_idx = -1
+            for i, row in df_raw.head(15).iterrows():
+                # Convertimos la fila a string y buscamos la palabra clave
+                row_str = row.astype(str).str.lower().tolist()
+                if any('código' in s or 'codigo' in s for s in row_str):
+                    header_idx = i
+                    break
             
-            # Leemos las primeras 15 líneas para buscar "Código"
-            for i in range(15):
-                line_bytes = uploaded_file.readline()
-                try:
-                    line_text = line_bytes.decode(enc).lower()
-                    if 'código' in line_text or 'codigo' in line_text:
-                        header_idx = i
-                        found_header = True
-                        break
-                except:
-                    continue 
-            
-            if not found_header:
-                header_idx = 0 # Si no encuentra, prueba desde el principio
-            
-            # 2. Leer con Pandas usando lo detectado
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, header=header_idx, encoding=enc)
-            
-            # Limpiar nombres de columnas (quitar espacios extra)
-            df.columns = [c.strip() for c in df.columns]
-            
-            # Verificar si tiene la columna clave
-            if 'Código' in df.columns or 'Codigo' in df.columns:
-                # Normalizar nombre
-                if 'Codigo' in df.columns:
-                    df.rename(columns={'Codigo': 'Código'}, inplace=True)
+            if header_idx != -1:
+                # Recargamos usando esa fila como cabecera
+                uploaded_file.seek(0)
+                df = pd.read_excel(uploaded_file, header=header_idx)
+                df = clean_columns(df)
                 return df
+            else:
+                # Si no encuentra header, intenta lectura estándar
+                uploaded_file.seek(0)
+                df = pd.read_excel(uploaded_file)
+                df = clean_columns(df)
+                return df
+        except Exception as e:
+            st.error(f"Error leyendo Excel: {e}")
+            return None
+
+    # --- ESTRATEGIA 2: ES UN CSV (Texto plano) ---
+    else:
+        encodings = ['utf-8', 'latin-1', 'cp1252']
+        separators = [',', ';', '\t']
+        
+        for enc in encodings:
+            try:
+                # Búsqueda manual de header en texto
+                uploaded_file.seek(0)
+                header_idx = 0
+                found = False
+                for i in range(15):
+                    line = uploaded_file.readline().decode(enc).lower()
+                    if 'código' in line or 'codigo' in line:
+                        header_idx = i
+                        found = True
+                        break
                 
-        except Exception:
-            continue # Si falla, probamos el siguiente encoding
-            
+                if not found: header_idx = 0
+
+                # Probar separadores
+                for sep in separators:
+                    uploaded_file.seek(0)
+                    try:
+                        df = pd.read_csv(uploaded_file, header=header_idx, encoding=enc, sep=sep)
+                        df = clean_columns(df)
+                        if 'Código' in df.columns:
+                            return df
+                    except:
+                        continue
+            except:
+                continue
+                
     return None
 
 def parse_product_code(code_str):
-    """Separa Modelo, Color y Talle según tu lógica"""
+    """Separa Modelo, Color y Talle"""
     try:
         if pd.isna(code_str): return "S/D", "S/D", "S/D"
         parts = str(code_str).strip().split('.')
@@ -100,10 +128,9 @@ def parse_product_code(code_str):
         return str(code_str), "Err", "Err"
 
 def color_rows(val):
-    """Colores para el reporte visual"""
-    if '✅ OK' in str(val): return 'background-color: #d4edda; color: #155724' # Verde
-    if '🔴 Falta' in str(val): return 'background-color: #f8d7da; color: #721c24' # Rojo
-    if '🟣 Sobra' in str(val): return 'background-color: #e2d9f3; color: #4a148c' # Violeta
+    if '✅ OK' in str(val): return 'background-color: #d4edda; color: #155724'
+    if '🔴 Falta' in str(val): return 'background-color: #f8d7da; color: #721c24'
+    if '🟣 Sobra' in str(val): return 'background-color: #e2d9f3; color: #4a148c'
     return ''
 
 # ==========================================
@@ -113,11 +140,9 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data():
     try:
-        # ttl=0 asegura datos frescos siempre
         df = conn.read(worksheet="Hoja1", ttl=0)
-        # Si la hoja está vacía o nueva, devolvemos estructura base
         if 'Nombre_Lote' not in df.columns:
-            return pd.DataFrame(columns=['Nombre_Lote', 'Estado_Stock', 'Código', 'Modelo_Ref', 'Color_Code', 'Talle_Code'])
+            return pd.DataFrame(columns=['Nombre_Lote', 'Estado_Stock', 'Código'])
         return df
     except:
         return pd.DataFrame(columns=['Nombre_Lote', 'Estado_Stock', 'Código'])
@@ -125,7 +150,7 @@ def load_data():
 df_master = load_data()
 
 # ==========================================
-# 4. INTERFAZ Y MENÚ
+# 4. INTERFAZ
 # ==========================================
 st.sidebar.title("Menú Principal")
 
@@ -149,66 +174,64 @@ st.title("👕 Sistema de Control de Stock")
 # ZONA A: INICIAR NUEVO STOCK
 # ---------------------------------------------------------
 if modo == "➕ Iniciar NUEVO Stock":
-    st.header("Cargar Nuevo Lote")
-    st.markdown("Sube un archivo Excel/CSV para comenzar un conteo nuevo.")
+    st.header("Cargar Nuevo Lote (Excel o CSV)")
     
     col1, col2 = st.columns(2)
     with col1:
         nuevo_lote = st.text_input("Nombre del Lote / Sector", placeholder="Ej: Deposito_Estanteria_1")
     with col2:
-        archivo = st.file_uploader("Subir archivo", type=['csv', 'xlsx'])
+        archivo = st.file_uploader("Subir archivo (.xlsx o .csv)", type=['xlsx', 'xls', 'csv'])
 
     if st.button("🚀 Procesar y Crear", type="primary") and archivo and nuevo_lote:
-        # Validación: Que el nombre no exista ya
-        if nuevo_lote in df_master['Nombre_Lote'].unique():
-            st.error(f"⚠️ Ya existe un lote llamado '{nuevo_lote}'. Usa otro nombre.")
+        # Limpieza de nombre y validación estricta
+        nombre_limpio = nuevo_lote.strip()
+        lotes_existentes = [str(x).strip() for x in df_master['Nombre_Lote'].unique()]
+        
+        if nombre_limpio in lotes_existentes:
+            st.error(f"⚠️ Ya existe un lote llamado '{nombre_limpio}'. Usa otro nombre.")
         else:
-            # USAMOS LA NUEVA FUNCIÓN DE LECTURA ROBUSTA
-            df_new = load_smart_csv(archivo)
+            # --- USAMOS LA NUEVA FUNCIÓN UNIVERSAL ---
+            df_new = load_universal_file(archivo)
             
-            if df_new is None:
-                st.error("❌ Error grave: No se pudo leer el archivo. Verifica que sea un CSV o Excel válido.")
+            if df_new is None or 'Código' not in df_new.columns:
+                st.error("❌ No se pudo leer el archivo o no se encontró la columna 'Código'. Revisa el Excel.")
             else:
                 try:
-                    # Procesamiento de columnas
+                    # Procesamiento
                     parsed = df_new['Código'].apply(parse_product_code)
                     df_new['Modelo_Ref'] = [x[0] for x in parsed]
                     df_new['Color_Code'] = [x[1] for x in parsed]
                     df_new['Talle_Code'] = [x[2] for x in parsed]
                     
-                    # Agregar columnas de sistema
-                    df_new['Nombre_Lote'] = nuevo_lote
+                    df_new['Nombre_Lote'] = nombre_limpio
                     df_new['Estado_Stock'] = "Pendiente"
                     df_new['Cant_Diferencia'] = 0
                     df_new['Fecha_Inicio'] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-                    # Limpieza de columnas vacías
+                    # Limpieza y Guardado
                     df_new = df_new.dropna(axis=1, how='all')
-                    
-                    # Guardar en la nube
                     updated_master = pd.concat([df_master, df_new], ignore_index=True)
                     conn.update(worksheet="Hoja1", data=updated_master)
                     
-                    st.success(f"✅ Lote '{nuevo_lote}' creado correctamente.")
+                    st.success(f"✅ Lote '{nombre_limpio}' creado correctamente.")
                     st.balloons()
                     time.sleep(2)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error procesando los datos: {e}")
+                    st.error(f"Error procesando datos: {e}")
 
 # ---------------------------------------------------------
 # ZONA B: CONTINUAR / EDITAR
 # ---------------------------------------------------------
 elif modo == "📂 Continuar / Editar Stock":
-    # Filtrar solo lotes válidos (no nulos)
     lotes = [x for x in df_master['Nombre_Lote'].unique() if str(x) != 'nan']
     
     if not lotes:
-        st.info("👋 No hay stocks activos. Ve a 'Iniciar NUEVO Stock'.")
+        st.info("👋 No hay stocks activos.")
     else:
         col_sel, col_btn = st.columns([3, 1])
         with col_sel:
-            seleccion = st.selectbox("Selecciona el Lote a trabajar:", lotes)
+            seleccion = st.selectbox("Selecciona el Lote:", lotes)
         with col_btn:
             st.write("") 
             st.write("") 
@@ -216,37 +239,27 @@ elif modo == "📂 Continuar / Editar Stock":
                 st.cache_data.clear()
                 st.rerun()
         
-        # Filtramos datos LOCALMENTE (Copia segura)
         df_lote = df_master[df_master['Nombre_Lote'] == seleccion].copy()
         
-        # Orden visual
         if 'Modelo_Ref' in df_lote.columns:
             df_lote = df_lote.sort_values(by=['Modelo_Ref', 'Color_Code', 'Talle_Code'])
 
-        # Barra de progreso
         total = len(df_lote)
         pendientes = len(df_lote[df_lote['Estado_Stock'] == 'Pendiente'])
         progreso = int(((total - pendientes) / total) * 100) if total > 0 else 0
         st.progress(progreso)
-        st.caption(f"Progreso: {progreso}% ({total - pendientes}/{total} items procesados)")
+        st.caption(f"Progreso: {progreso}%")
 
-        # Configuración del Editor
         cols_cfg = {
             "Código": st.column_config.TextColumn("Código", disabled=True),
             "Descripción": st.column_config.TextColumn("Desc.", disabled=True),
-            "Estado_Stock": st.column_config.SelectboxColumn(
-                "Estado (Click para editar)", 
-                options=["Pendiente", "✅ OK", "🔴 Falta", "🟣 Sobra"],
-                required=True
-            ),
+            "Estado_Stock": st.column_config.SelectboxColumn("Estado", options=["Pendiente", "✅ OK", "🔴 Falta", "🟣 Sobra"], required=True),
             "Cant_Diferencia": st.column_config.NumberColumn("Cant. Dif.", min_value=0, step=1)
         }
         
         cols_show = ['Modelo_Ref', 'Color_Code', 'Talle_Code', 'Descripción', 'Estado_Stock', 'Cant_Diferencia']
         cols_final = [c for c in cols_show if c in df_lote.columns]
 
-        st.write("### 📝 Planilla de Edición")
-        
         edited_lote = st.data_editor(
             df_lote[cols_final],
             column_config=cols_cfg,
@@ -256,57 +269,38 @@ elif modo == "📂 Continuar / Editar Stock":
             key=f"editor_{seleccion}"
         )
         
-        # BOTÓN DE GUARDADO
         if st.button("💾 Guardar Cambios en la Nube", type="primary"):
-            # 1. Actualizar copia local
             df_lote.update(edited_lote)
-            
-            # 2. Reconstruir Master (Todo lo que NO es este lote + Este lote actualizado)
             df_clean_master = df_master[df_master['Nombre_Lote'] != seleccion]
             df_final_upload = pd.concat([df_clean_master, df_lote], ignore_index=True)
-            
-            # 3. Subir
             conn.update(worksheet="Hoja1", data=df_final_upload)
-            
-            st.success("✅ ¡Guardado! Datos sincronizados.")
+            st.success("✅ Guardado.")
             time.sleep(1)
             st.rerun()
 
-        # RESUMEN DE DIFERENCIAS
         st.divider()
-        st.write("### 🚨 Reporte de Diferencias")
         diferencias = df_lote[df_lote['Estado_Stock'].isin(['🔴 Falta', '🟣 Sobra'])]
-        
         if not diferencias.empty:
-            st.dataframe(
-                diferencias[cols_final].style.map(color_rows, subset=['Estado_Stock']),
-                use_container_width=True, 
-                hide_index=True
-            )
+            st.write("### 🚨 Diferencias")
+            st.dataframe(diferencias[cols_final].style.map(color_rows, subset=['Estado_Stock']), use_container_width=True, hide_index=True)
         else:
-            st.info("Todo OK o Pendiente por ahora.")
+            st.info("Todo OK o Pendiente.")
 
 # ---------------------------------------------------------
 # ZONA C: ADMIN - BORRADO
 # ---------------------------------------------------------
 elif modo == "🛑 Zona Admin (Borrar)":
     st.header("⚠️ Zona de Peligro: Eliminar Stocks")
-    
     lotes = [x for x in df_master['Nombre_Lote'].unique() if str(x) != 'nan']
     
     if not lotes:
         st.write("No hay stocks para borrar.")
     else:
-        lote_borrar = st.selectbox("Selecciona el Lote a eliminar:", lotes)
-        st.warning(f"Se eliminarán permanentemente todas las filas de '{lote_borrar}'.")
-        
+        lote_borrar = st.selectbox("Eliminar lote:", lotes)
+        st.warning(f"Se borrará '{lote_borrar}' para siempre.")
         if st.button(f"🔥 ELIMINAR '{lote_borrar}'"):
-            # Filtrar master quitando el lote seleccionado
             df_nuevo_master = df_master[df_master['Nombre_Lote'] != lote_borrar]
-            
-            # Actualizar nube
             conn.update(worksheet="Hoja1", data=df_nuevo_master)
-            
-            st.success("Lote eliminado.")
+            st.success("Eliminado.")
             time.sleep(1)
             st.rerun()
