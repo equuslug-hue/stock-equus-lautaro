@@ -3,33 +3,55 @@ import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 import time
+import streamlit.components.v1 as components
 
-# Configuración básica
+# ==========================================
+# 0. CONFIGURACIÓN Y WAKE LOCK (Pantalla Encendida)
+# ==========================================
 st.set_page_config(page_title="Stock Equus", layout="wide")
 
-# CSS para optimización móvil
+# Script para que no se apague la pantalla del celular
+def keep_screen_awake():
+    keep_awake_code = """
+    <script>
+    async function requestWakeLock() {
+      try {
+        const wakeLock = await navigator.wakeLock.request('screen');
+        console.log('Pantalla mantenida encendida');
+      } catch (err) {}
+    }
+    requestWakeLock();
+    document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState === 'visible') await requestWakeLock();
+    });
+    </script>
+    """
+    components.html(keep_awake_code, height=0)
+
+keep_screen_awake()
+
+# CSS para maximizar espacio en celular
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    /* Botones más grandes */
     .stButton > button {
-        height: 3.5em; 
+        height: 3em; 
         font-weight: bold;
         font-size: 16px;
     }
-    /* Inputs más grandes */
-    .stTextInput > div > div > input {
-        font-size: 16px;
+    /* Ajuste para que los filtros no ocupen tanto lugar */
+    .stExpander {
+        border: 1px solid #ddd;
+        border-radius: 8px;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. GESTIÓN DE SESIÓN Y MEMORIA
+# 1. GESTIÓN DE SESIÓN
 # ==========================================
 if 'admin_logged_in' not in st.session_state: st.session_state.admin_logged_in = False
-if 'cambios_temporales' not in st.session_state: st.session_state.cambios_temporales = {} # Memoria de cambios
 
 def check_admin_password():
     try:
@@ -44,7 +66,7 @@ def check_admin_password():
 def logout(): st.session_state.admin_logged_in = False
 
 # ==========================================
-# 2. FUNCIONES DE LECTURA
+# 2. FUNCIONES DE LECTURA Y LIMPIEZA
 # ==========================================
 def clean_columns(df):
     df.columns = [str(c).strip().replace('\ufeff', '') for c in df.columns]
@@ -71,14 +93,11 @@ def load_universal_file(uploaded_file):
                     try:
                         uploaded_file.seek(0)
                         temp = pd.read_csv(uploaded_file, encoding=enc, sep=sep, engine='python')
-                        if len(temp.columns)>1: 
-                            df = temp; break
+                        if len(temp.columns)>1: df = temp; break
                     except: continue
                 if df is not None: break
         
-        if df is not None:
-            df = clean_columns(df)
-            return df
+        if df is not None: return clean_columns(df)
     except: return None
     return df
 
@@ -95,8 +114,14 @@ def sanitize_dataframe(df):
         df[col] = df[col].apply(lambda x: f"'{x}" if str(x).startswith(('=','+','-','@')) else x)
     return df
 
+def color_rows(val):
+    if '✅ OK' in str(val): return 'background-color: #d4edda'
+    if '🔴 Falta' in str(val): return 'background-color: #f8d7da'
+    if '🟣 Sobra' in str(val): return 'background-color: #e2d9f3'
+    return ''
+
 # ==========================================
-# 3. CONEXIÓN Y DATOS
+# 3. CONEXIÓN
 # ==========================================
 conn = st.connection("gsheets", type=GSheetsConnection)
 
@@ -106,57 +131,154 @@ def load_data():
         req = ['Nombre_Lote', 'Estado_Stock', 'Código', 'Color', 'Stock 1ra un.', 'Descripción', 'Modelo_Ref', 'Cant_Diferencia']
         for c in req: 
             if c not in df.columns: df[c] = None
-        
-        # --- APLICAR CAMBIOS TEMPORALES DE LA MEMORIA AL DATAFRAME ---
-        # Esto asegura que si recargas, ves lo que editaste
-        if not df.empty and st.session_state.cambios_temporales:
-            for idx, cambios in st.session_state.cambios_temporales.items():
-                if idx in df.index:
-                    for k, v in cambios.items():
-                        df.at[idx, k] = v
         return df
     except: return pd.DataFrame(columns=['Nombre_Lote'])
 
-# Carga inicial
 df_master = load_data()
 
 # ==========================================
-# 4. INTERFAZ
+# 4. INTERFAZ SIMPLE
 # ==========================================
 st.sidebar.title("Menú")
 
-modo_visual = st.sidebar.radio("Vista:", ["📱 MODO CELULAR", "💻 MODO PC"], index=0)
-st.sidebar.divider()
-
 if st.session_state.admin_logged_in:
-    if st.sidebar.button("Salir Admin"): logout(); st.rerun()
+    st.sidebar.success("Admin Activo")
+    if st.sidebar.button("Salir"): logout(); st.rerun()
     accion = st.sidebar.radio("Acción:", ["Trabajar Stock", "Nuevo Stock", "Borrar Stock"])
 else:
-    with st.sidebar.expander("Admin"):
+    with st.sidebar.expander("Admin Login"):
         st.text_input("Clave", type="password", key="password_input", on_change=check_admin_password)
     accion = st.sidebar.radio("Acción:", ["Trabajar Stock", "Nuevo Stock"])
 
 st.title("👕 Control de Stock")
 
 # ---------------------------------------------------------
-# A. NUEVO STOCK
+# A. TRABAJAR STOCK (LO MÁS IMPORTANTE)
 # ---------------------------------------------------------
-if accion == "Nuevo Stock":
-    st.header("Crear Lote")
+if accion == "Trabajar Stock":
+    lotes = [x for x in df_master['Nombre_Lote'].unique() if str(x) != 'nan']
+    if not lotes:
+        st.info("No hay stocks activos. Crea uno nuevo.")
+    else:
+        # Selección de Lote
+        col_lote, col_btn = st.columns([3, 1])
+        with col_lote:
+            seleccion = st.selectbox("Selecciona Lote:", lotes)
+        with col_btn:
+            st.write("")
+            if st.button("🔄", help="Recargar datos"): st.cache_data.clear(); st.rerun()
+
+        # Cargar Datos
+        df_lote = df_master[df_master['Nombre_Lote'] == seleccion].copy()
+        
+        # --- FILTROS POTENTES ---
+        with st.expander("🔍 FILTROS (Toca para desplegar)", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            
+            # 1. Filtro Texto (Código)
+            with c1:
+                f_cod = st.text_input("Buscar Cód:", placeholder="...").strip()
+            
+            # 2. Filtro Descripción
+            with c2:
+                all_desc = sorted(df_lote['Descripción'].dropna().astype(str).unique())
+                f_desc = st.selectbox("Descripción:", ["Todos"] + all_desc)
+            
+            # 3. Filtro Color (Dependiente)
+            with c3:
+                if f_desc != "Todos":
+                    sub_df = df_lote[df_lote['Descripción'] == f_desc]
+                    all_col = sorted(sub_df['Color'].dropna().astype(str).unique())
+                else:
+                    all_col = sorted(df_lote['Color'].dropna().astype(str).unique())
+                f_col = st.selectbox("Color:", ["Todos"] + all_col)
+
+        # APLICAR FILTROS
+        df_view = df_lote.copy()
+        if f_cod: 
+            df_view = df_view[df_view['Código'].astype(str).str.contains(f_cod, case=False, na=False)]
+        if f_desc != "Todos": 
+            df_view = df_view[df_view['Descripción'] == f_desc]
+        if f_col != "Todos": 
+            df_view = df_view[df_view['Color'] == f_col]
+        
+        # Ordenar
+        if 'Modelo_Ref' in df_view.columns:
+            df_view = df_view.sort_values(by=['Modelo_Ref', 'Color_Code', 'Talle_Code'])
+
+        st.caption(f"Mostrando **{len(df_view)}** items filtrados.")
+
+        # --- TABLA DE EDICIÓN (ESTABLE) ---
+        # Configuramos para que sea lo más amigable posible en móvil
+        editor = st.data_editor(
+            df_view[['Talle_Code', 'Color', 'Descripción', 'Stock 1ra un.', 'Estado_Stock', 'Cant_Diferencia']],
+            column_config={
+                "Talle_Code": st.column_config.TextColumn("Talle", disabled=True),
+                "Color": st.column_config.TextColumn("Color", disabled=True),
+                "Descripción": st.column_config.TextColumn("Desc.", disabled=True),
+                "Stock 1ra un.": st.column_config.NumberColumn("Stk", disabled=True),
+                "Estado_Stock": st.column_config.SelectboxColumn(
+                    "Estado", 
+                    options=["Pendiente", "✅ OK", "🔴 Falta", "🟣 Sobra"],
+                    required=True,
+                    width="small"
+                ),
+                "Cant_Diferencia": st.column_config.NumberColumn(
+                    "Dif", 
+                    min_value=-100, max_value=100, step=1,
+                    width="small",
+                    help="Usa botones +/- si aparecen"
+                )
+            },
+            use_container_width=True,
+            height=500, # Altura fija para evitar saltos
+            hide_index=True,
+            key=f"editor_final_{seleccion}"
+        )
+        
+        # BOTÓN DE GUARDADO GIGANTE
+        if st.button("💾 GUARDAR CAMBIOS EN LA NUBE", type="primary", use_container_width=True):
+            # 1. Actualizar el lote local con lo editado
+            df_lote.update(editor)
+            
+            # 2. Reconstruir el master (quitando lo viejo y poniendo lo nuevo)
+            clean_master = df_master[df_master['Nombre_Lote'] != seleccion]
+            final_upload = pd.concat([clean_master, df_lote], ignore_index=True)
+            
+            # 3. Subir
+            conn.update(worksheet="Hoja1", data=final_upload)
+            st.success("✅ Guardado exitoso!")
+            time.sleep(1)
+            st.rerun()
+            
+        st.divider()
+        # Resumen rápido de diferencias
+        dif = df_lote[df_lote['Estado_Stock'].isin(['🔴 Falta', '🟣 Sobra'])]
+        if not dif.empty:
+            st.warning(f"Resumen: Hay {len(dif)} items con diferencias.")
+            st.dataframe(dif[['Descripción', 'Talle_Code', 'Estado_Stock', 'Cant_Diferencia']], use_container_width=True, hide_index=True)
+
+# ---------------------------------------------------------
+# B. NUEVO STOCK
+# ---------------------------------------------------------
+elif accion == "Nuevo Stock":
+    st.header("Crear Nuevo Lote")
     lote = st.text_input("Nombre Sector")
-    file = st.file_uploader("Archivo")
-    if st.button("Procesar", type="primary", use_container_width=True) and file and lote:
-        if lote.strip() in [str(x) for x in df_master['Nombre_Lote'].unique()]:
+    file = st.file_uploader("Archivo Excel/CSV")
+    
+    if st.button("🚀 Crear", type="primary", use_container_width=True) and file and lote:
+        lote = lote.strip()
+        if lote in [str(x) for x in df_master['Nombre_Lote'].unique()]:
             st.error("Nombre repetido.")
         else:
             df = load_universal_file(file)
-            if df is not None and 'Código' in clean_columns(df).columns:
+            if df is not None and 'Código' in df.columns:
                 df = sanitize_dataframe(df)
                 parsed = df['Código'].apply(parse_product_code)
                 df['Modelo_Ref'] = [x[0] for x in parsed]
                 df['Color_Code'] = [x[1] for x in parsed]
                 df['Talle_Code'] = [x[2] for x in parsed]
-                df['Nombre_Lote'] = lote.strip()
+                df['Nombre_Lote'] = lote
                 df['Estado_Stock'] = "Pendiente"
                 df['Cant_Diferencia'] = 0
                 for c in ['Color','Descripción']: 
@@ -167,183 +289,17 @@ if accion == "Nuevo Stock":
                 master = pd.concat([df_master, df], ignore_index=True)
                 conn.update(worksheet="Hoja1", data=master)
                 st.success("Creado!"); time.sleep(1); st.rerun()
-            else: st.error("Error archivo.")
+            else: st.error("Error en archivo.")
 
 # ---------------------------------------------------------
-# B. TRABAJAR STOCK
-# ---------------------------------------------------------
-elif accion == "Trabajar Stock":
-    lotes = [x for x in df_master['Nombre_Lote'].unique() if str(x) != 'nan']
-    if not lotes:
-        st.info("Sin stocks.")
-    else:
-        seleccion = st.selectbox("Lote:", lotes)
-        
-        # Filtro de datos
-        df_lote = df_master[df_master['Nombre_Lote'] == seleccion].copy()
-        
-        # ==================== MODO CELULAR ====================
-        if modo_visual == "📱 MODO CELULAR":
-            st.divider()
-            
-            # --- FILTROS CELULAR ---
-            with st.expander("🔍 FILTROS (Toca para abrir)", expanded=False):
-                f_cod = st.text_input("Buscar por Código:", placeholder="Ej: 0400...").strip()
-                
-                # Filtros inteligentes
-                all_desc = sorted(df_lote['Descripción'].dropna().astype(str).unique())
-                f_desc = st.selectbox("Filtrar Item:", ["Todos"] + all_desc)
-                
-                if f_desc != "Todos":
-                    sub_df = df_lote[df_lote['Descripción'] == f_desc]
-                    all_col = sorted(sub_df['Color'].dropna().astype(str).unique())
-                else:
-                    all_col = sorted(df_lote['Color'].dropna().astype(str).unique())
-                
-                f_col = st.selectbox("Filtrar Color:", ["Todos"] + all_col)
-
-            # Aplicar filtros
-            df_view = df_lote.copy()
-            if f_cod: 
-                df_view = df_view[df_view['Código'].astype(str).str.contains(f_cod, case=False, na=False)]
-            if f_desc != "Todos": 
-                df_view = df_view[df_view['Descripción'] == f_desc]
-            if f_col != "Todos": 
-                df_view = df_view[df_view['Color'] == f_col]
-            
-            # Ordenar
-            if 'Modelo_Ref' in df_view.columns:
-                df_view = df_view.sort_values(by=['Modelo_Ref', 'Color_Code', 'Talle_Code'])
-            
-            # --- FICHA DE PRODUCTO ---
-            if len(df_view) > 0:
-                # Navegación
-                if 'idx_cel' not in st.session_state: st.session_state.idx_cel = 0
-                if st.session_state.idx_cel >= len(df_view): st.session_state.idx_cel = 0
-                
-                row = df_view.iloc[st.session_state.idx_cel]
-                real_idx = row.name # ID real para guardar
-                
-                # Estado actual (chequear memoria temporal primero)
-                mem_data = st.session_state.cambios_temporales.get(real_idx, {})
-                curr_est = mem_data.get('Estado_Stock', row['Estado_Stock'])
-                curr_dif = float(mem_data.get('Cant_Diferencia', row['Cant_Diferencia']))
-                
-                # Diseño de Tarjeta
-                with st.container(border=True):
-                    st.caption(f"Item {st.session_state.idx_cel + 1} de {len(df_view)}")
-                    st.markdown(f"#### {row['Descripción']}")
-                    
-                    c1, c2 = st.columns(2)
-                    c1.metric("Talle", str(row.get('Talle_Code','-')))
-                    c2.metric("Color", str(row.get('Color','-')))
-                    
-                    st.markdown(f"**Stock Sistema:** `{int(row.get('Stock 1ra un.',0))}`")
-                    st.divider()
-                    
-                    # CONTROLES DE ESTADO (Botones grandes)
-                    st.write("Estado:")
-                    col_ok, col_falta, col_sobra = st.columns(3)
-                    
-                    # Funciones para actualizar memoria
-                    def set_status(val):
-                        if real_idx not in st.session_state.cambios_temporales:
-                            st.session_state.cambios_temporales[real_idx] = {}
-                        st.session_state.cambios_temporales[real_idx]['Estado_Stock'] = val
-                        # Si pone OK, reseteamos diferencia
-                        if val == "✅ OK":
-                            st.session_state.cambios_temporales[real_idx]['Cant_Diferencia'] = 0
-                    
-                    # Renderizar botones con estilo según selección
-                    if col_ok.button("✅ OK", use_container_width=True, type="primary" if curr_est=="✅ OK" else "secondary"):
-                        set_status("✅ OK"); st.rerun()
-                    
-                    if col_falta.button("🔴 Falta", use_container_width=True, type="primary" if curr_est=="🔴 Falta" else "secondary"):
-                        set_status("🔴 Falta"); st.rerun()
-                        
-                    if col_sobra.button("🟣 Sobra", use_container_width=True, type="primary" if curr_est=="🟣 Sobra" else "secondary"):
-                        set_status("🟣 Sobra"); st.rerun()
-
-                    # CONTROLES DIFERENCIA
-                    if curr_est in ["🔴 Falta", "🟣 Sobra"]:
-                        st.write("Cantidad Diferencia:")
-                        cd1, cd2, cd3 = st.columns([1,2,1])
-                        
-                        if cd1.button("➖", key="dm", use_container_width=True):
-                            st.session_state.cambios_temporales.setdefault(real_idx, {})['Cant_Diferencia'] = curr_dif - 1
-                            st.rerun()
-                            
-                        cd2.markdown(f"<h2 style='text-align:center'>{int(curr_dif)}</h2>", unsafe_allow_html=True)
-                        
-                        if cd3.button("➕", key="dp", use_container_width=True):
-                            st.session_state.cambios_temporales.setdefault(real_idx, {})['Cant_Diferencia'] = curr_dif + 1
-                            st.rerun()
-
-                # BOTONES DE NAVEGACIÓN
-                cn1, cn2 = st.columns(2)
-                if cn1.button("⬅️ Anterior", use_container_width=True):
-                    st.session_state.idx_cel = max(0, st.session_state.idx_cel - 1)
-                    st.rerun()
-                
-                # El botón siguiente funciona como "Confirmar y Avanzar"
-                if cn2.button("Siguiente ➡️", use_container_width=True):
-                    st.session_state.idx_cel = min(len(df_view) - 1, st.session_state.idx_cel + 1)
-                    st.rerun()
-
-            else:
-                st.warning("No hay productos con esos filtros.")
-
-            st.write("")
-            st.divider()
-            
-            # BOTÓN DE GUARDADO FINAL (Aplica la memoria temporal a Google Sheets)
-            if st.button("💾 GUARDAR TODO EN LA NUBE", type="primary", use_container_width=True):
-                if st.session_state.cambios_temporales:
-                    # Aplicar cambios al master
-                    for idx, changes in st.session_state.cambios_temporales.items():
-                        if idx in df_master.index:
-                            for k, v in changes.items():
-                                df_master.at[idx, k] = v
-                    
-                    # Subir
-                    conn.update(worksheet="Hoja1", data=df_master)
-                    st.session_state.cambios_temporales = {} # Limpiar memoria tras guardar
-                    st.success("¡Datos guardados en Google Sheets!")
-                    time.sleep(2)
-                    st.rerun()
-                else:
-                    st.info("No hay cambios nuevos para guardar.")
-
-        # ==================== MODO PC ====================
-        else:
-            # (Código PC anterior...)
-            if st.button("🔄 Recargar"): st.cache_data.clear(); st.rerun()
-            
-            editor = st.data_editor(
-                df_lote[['Talle_Code', 'Color', 'Descripción', 'Stock 1ra un.', 'Estado_Stock', 'Cant_Diferencia']],
-                column_config={
-                    "Estado_Stock": st.column_config.SelectboxColumn("Estado", options=["Pendiente", "✅ OK", "🔴 Falta", "🟣 Sobra"], required=True),
-                    "Cant_Diferencia": st.column_config.NumberColumn("Dif", step=1)
-                },
-                use_container_width=True,
-                height=600,
-                key=f"pc_{seleccion}"
-            )
-            if st.button("💾 Guardar PC", type="primary"):
-                df_lote.update(editor)
-                clean = df_master[df_master['Nombre_Lote'] != seleccion]
-                final = pd.concat([clean, df_lote], ignore_index=True)
-                conn.update(worksheet="Hoja1", data=final)
-                st.success("Guardado.")
-
-# ---------------------------------------------------------
-# C. BORRAR
+# C. BORRAR (ADMIN)
 # ---------------------------------------------------------
 elif accion == "Borrar Stock":
+    st.header("Zona Admin")
     lotes = [x for x in df_master['Nombre_Lote'].unique() if str(x) != 'nan']
     if lotes:
         b = st.selectbox("Borrar:", lotes)
-        if st.button("🔥 Confirmar"):
+        if st.button("🔥 Confirmar Borrado"):
             new = df_master[df_master['Nombre_Lote'] != b]
             conn.update(worksheet="Hoja1", data=new)
             st.success("Borrado."); time.sleep(1); st.rerun()
